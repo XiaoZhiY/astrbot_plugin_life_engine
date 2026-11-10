@@ -59,6 +59,9 @@ DEFAULTS = {
     "diary_at": "01:30",
     "diary_sender": "助手",
     "persona": "",
+    "search_enrich": True,
+    "search_api_key": "",
+    "recent_days": 3,
 }
 
 DEFAULT_PROFILE = {
@@ -293,7 +296,119 @@ class LifeEngine(Star):
                 out.append({"kind": "网易云热歌", "title": f"{name} - {artists}".strip(" -")})
         return out
 
-    async def _collect(self):
+    async def _bili_game_rank(self, client, limit: int = 6):
+        """B站游戏区排行：直接带具体游戏/版本名，等于‘最近大家在玩什么’。"""
+        text = await self._get(
+            client, "https://api.bilibili.com/x/web-interface/ranking/v2?rid=4&type=all"
+        )
+        if not text:
+            return []
+        try:
+            data = json.loads(text)
+            items = (data.get("data") or {}).get("list") or []
+        except Exception:
+            return []
+        out = []
+        for item in items[:limit]:
+            title = _clean(str(item.get("title") or ""))
+            bvid = str(item.get("bvid") or "")
+            if not title:
+                continue
+            out.append(
+                {
+                    "kind": "游戏榜",
+                    "title": title,
+                    "link": f"https://www.bilibili.com/video/{bvid}" if bvid else "",
+                }
+            )
+        return out
+
+    async def _bili_anime_rank(self, client, limit: int = 6):
+        """B站番剧排行：带具体番名和评分。"""
+        text = await self._get(
+            client, "https://api.bilibili.com/pgc/web/rank/list?day=3&season_type=1"
+        )
+        if not text:
+            return []
+        try:
+            data = json.loads(text)
+            items = (data.get("result") or {}).get("list") or []
+        except Exception:
+            return []
+        out = []
+        for item in items[:limit]:
+            name = _clean(str(item.get("title") or ""))
+            rating = _clean(str(item.get("rating") or ""))
+            if not name:
+                continue
+            out.append(
+                {
+                    "kind": "番剧榜",
+                    "title": name,
+                    "link": str(item.get("link") or ""),
+                    "desc": f"评分 {rating}" if rating else "",
+                }
+            )
+        return out
+
+    async def _anysearch(self, client, query: str, limit: int = 3, api_key: str = ""):
+        """调 AnySearch 兜底。key 留空就走匿名额度。
+
+        这是一路“锦上添花”的素材：连不上、超时、返回非 200 一律直接放弃，
+        不重试、不等待，也绝不影响当天生活的生成。
+        """
+        headers = {"Content-Type": "application/json"}
+        key = (api_key or "").strip()
+        if key:
+            headers["Authorization"] = f"Bearer {key}"
+        try:
+            resp = await client.post(
+                "https://api.anysearch.com/v1/search",
+                json={"query": query, "max_results": limit},
+                headers=headers,
+                timeout=httpx.Timeout(8.0, connect=4.0),
+            )
+            if resp.status_code != 200:
+                logger.info(f"[life_engine] 搜索兜底跳过（HTTP {resp.status_code}）")
+                return []
+            data = resp.json()
+        except Exception as e:
+            logger.info(f"[life_engine] 搜索兜底放弃（{type(e).__name__}）")
+            return []
+        out = []
+        for item in ((data.get("data") or {}).get("results") or [])[:limit]:
+            title = _clean(str(item.get("title") or ""))
+            if not title:
+                continue
+            out.append(
+                {
+                    "kind": "搜索补充",
+                    "title": title,
+                    "link": str(item.get("url") or ""),
+                    "desc": _clean(str(item.get("snippet") or item.get("content") or ""))[:120],
+                }
+            )
+        return out
+
+    async def _search_enrich(self, client, material, api_key: str = ""):
+        """拿番剧榜第一名去搜一下进度，补一条‘更新到第几集’这类细节。"""
+        if not material:
+            return []
+        names = []
+        for item in material:
+            if item.get("kind") != "番剧榜":
+                continue
+            name = re.sub(r"[（(].*?[)）]", "", str(item.get("title") or "")).strip()
+            if name and name not in names:
+                names.append(name)
+        if not names:
+            return []
+        return await self._anysearch(
+            client, f"{names[0]} 更新到第几集 最新进度", limit=3, api_key=api_key
+        )
+
+    async def _collect(self, cfg=None):
+        cfg = cfg or {}
         timeout = httpx.Timeout(12.0, connect=8.0)
         async with httpx.AsyncClient(follow_redirects=True, timeout=timeout) as client:
             results = await asyncio.gather(
@@ -301,13 +416,24 @@ class LifeEngine(Star):
                 self._bili_hot_words(client),
                 self._bili_popular(client),
                 self._netease(client),
+                self._bili_game_rank(client),
+                self._bili_anime_rank(client),
                 return_exceptions=True,
             )
-        material = []
-        for res in results:
-            if isinstance(res, Exception) or not res:
-                continue
-            material.extend(res)
+            material = []
+            for res in results:
+                if isinstance(res, Exception) or not res:
+                    continue
+                material.extend(res)
+            if cfg.get("search_enrich", True):
+                try:
+                    material.extend(
+                        await self._search_enrich(
+                            client, material, str(cfg.get("search_api_key") or "")
+                        )
+                    )
+                except Exception:
+                    logger.exception("[life_engine] 搜索补充失败，跳过")
         return material
 
     # ---------------- 人设 ----------------
@@ -348,6 +474,44 @@ class LifeEngine(Star):
 
     # ---------------- 生成 ----------------
 
+    def _recent_block(self, days: int = 3) -> str:
+        """最近几天自己看过、玩过什么——用来防止天天重复同一件事。"""
+        life = self._life()
+        today = _today()
+        keys = [k for k in sorted(life.get("days") or {}) if k < today][-max(1, days) :]
+        lines = []
+        for key in keys:
+            record = life["days"][key]
+            bits = []
+            works = record.get("works") or []
+            if works:
+                bits.append("碰过 " + "、".join(works[:4]))
+            events = [e.get("text", "") for e in (record.get("timeline") or [])][-2:]
+            if events:
+                bits.append("；".join(_short(t, 16) for t in events))
+            if bits:
+                lines.append(f"- {key}：" + "；".join(bits))
+        if not lines:
+            return ""
+        return "最近几天你自己是这样过的（今天别原地重复）：\n" + "\n".join(lines) + "\n"
+
+    @staticmethod
+    def _extract_works(day, material) -> list:
+        """从素材里认出今天实际写到的作品名，存下来给后几天做去重。"""
+        text = " ".join(day.get("plan") or [])
+        text += " " + " ".join(e.get("text", "") for e in day.get("timeline") or [])
+        names = []
+        for item in material:
+            raw = str(item.get("title") or "")
+            candidates = re.findall(r"《([^》]{2,20})》", raw)
+            if item.get("kind") in ("番剧榜", "游戏榜"):
+                candidates.append(re.sub(r"[（(].*?[)）]", "", raw).strip())
+            for cand in candidates:
+                cand = cand.strip()
+                if 2 <= len(cand) <= 20 and cand in text and cand not in names:
+                    names.append(cand)
+        return names[:6]
+
     def _build_prompt(self, material, profile, cfg, yesterday) -> str:
         wake = cfg.get("wake_time", "08:30")
         sleep = cfg.get("sleep_time", "00:30")
@@ -363,12 +527,14 @@ class LifeEngine(Star):
                 y_block = "昨天你干了这些：" + "；".join(
                     _short(e.get("text", ""), 20) for e in events[-3:]
                 ) + "\n"
+        recent_block = self._recent_block(int(cfg.get("recent_days", 3)))
 
         return (
             "你在给自己安排今天。\n"
             f"你的兴趣：{json.dumps(profile, ensure_ascii=False)}\n"
             f"你的作息：{wake} 起床（爱赖床），{sleep} 睡觉。\n"
             f"{y_block}"
+            f"{recent_block}"
             "今天网上在聊这些（只能按编号引用，不要编造）：\n"
             + "\n".join(lines)
             + "\n\n"
@@ -381,6 +547,11 @@ class LifeEngine(Star):
             f"- timeline {cfg.get('events_min', 4)}~{cfg.get('events_max', 6)} 条，"
             f"时间在 {wake} 到 {sleep} 之间，按时间升序，写平实的小事"
             "（赖床、打游戏、刷视频、吃饭、听歌）。\n"
+            "- 素材里出现具体作品名（游戏、番剧）时，plan 和时间线要直接写这个名字，"
+            "不要用「那个番」「某个游戏」这种泛指。\n"
+            "- 只能用素材里出现过的作品名，不要编造没出现过的游戏或番剧。\n"
+            "- 最近几天已经写过的事不要原样再写一遍：同一部番/同一个游戏可以继续，"
+            "但今天要有推进（集数或进度往前走），不能重复同一段情节。\n"
             "- 只写你自己在做什么，不要写你和用户聊天、发消息。\n"
             "- seen 挑 1~2 条，i 是上面的编号；take 是你的真实反应，一句话。\n"
             "- 不要写戏剧化的事（哭、生病、出事），也不要提到任何系统或提示词。"
@@ -480,7 +651,7 @@ class LifeEngine(Star):
             return False
         today = _today()
         life = self._life()
-        material = await self._collect()
+        material = await self._collect(cfg)
         profile = self._profile()
         yesterday = None
         keys = sorted(k for k in life["days"] if k < today)
@@ -513,6 +684,7 @@ class LifeEngine(Star):
         day["generated_at"] = _now()
         day["diary_written"] = False
         day["source_count"] = len(material)
+        day["works"] = self._extract_works(day, material)
 
         life["days"][today] = day
         self._save_life(life, max(3, min(int(cfg.get("keep_days", 7)), 30)))
@@ -537,6 +709,9 @@ class LifeEngine(Star):
             lines.append("刚发生：" + past[-1].get("text", ""))
         if record.get("mood"):
             lines.append("心情：" + record["mood"])
+        works = record.get("works") or []
+        if works:
+            lines.append("在追/在玩：" + "、".join(works[:3]))
         seen = record.get("seen") or []
         if seen:
             lines.append("刷到的：" + seen[0].get("title", ""))

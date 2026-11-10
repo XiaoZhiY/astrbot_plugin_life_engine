@@ -11,6 +11,29 @@
     "default": "",
     "hint": "留空会自动读取该会话当前人设；读不到人设时才用这一句，一两句话即可。"
   },
+  "search_enrich": {
+    "description": "用搜索补一条番剧进度",
+    "type": "bool",
+    "default": true,
+    "hint": "每天生成时拿番剧榜第一名去 AnySearch 搜一次进度，补一条“更新到第几集”。不通就跳过，不重试、不影响生成。"
+  },
+  "search_api_key": {
+    "description": "AnySearch API Key（可空）",
+    "type": "string",
+    "default": "",
+    "hint": "留空走匿名额度（每天 1000 次，按 IP 限流）。注册后填 key 则额度绑到账号上，不跟 IP 走。"
+  },
+  "recent_days": {
+    "description": "防重复：看最近几天",
+    "type": "int",
+    "default": 3,
+    "slider": {
+      "min": 1,
+      "max": 7,
+      "step": 1
+    },
+    "hint": "把最近几天的“看过/玩过”和做过的事喂给模型，让它今天别原地重复。"
+  },
   "generate_hour": {
     "description": "每天几点安排今天（时）",
     "type": "int",
