@@ -33,6 +33,7 @@ PLUGIN_DIR = DATA_DIR / "plugin_data" / "life_engine"
 LIFE_PATH = PLUGIN_DIR / "life.json"
 STATE_PATH = PLUGIN_DIR / "state.json"
 PROFILE_PATH = PLUGIN_DIR / "profile.json"
+LIBRARY_PATH = PLUGIN_DIR / "library.json"
 DIARY_DB = DATA_DIR / "plugin_data" / "memory_diary" / "memory.db"
 
 UA = (
@@ -62,6 +63,9 @@ DEFAULTS = {
     "search_enrich": True,
     "search_api_key": "",
     "recent_days": 3,
+    "discover_enabled": True,
+    "discover_per_day": 2,
+    "cooldown_days": 60,
 }
 
 DEFAULT_PROFILE = {
@@ -69,6 +73,11 @@ DEFAULT_PROFILE = {
     "platforms": ["B站", "抖音", "网易云"],
     "games": ["王者荣耀", "原神", "Steam 独立游戏", "3A 单机"],
     "anime": ["日番", "国创"],
+    "preferences": {
+        "anime": ["悬疑推理", "日常治愈", "科幻"],
+        "games": ["roguelike", "独立解谜", "模拟经营"],
+        "avoid": ["后宫", "恐怖", "竞技"],
+    },
     "topics": ["猫", "生活区vlog", "美食探店", "番剧吐槽", "游戏攻略", "独立游戏新作"],
     "habits": ["熬夜", "赖床", "半夜饿了找吃的"],
     "avoid": ["出门玩", "和网友私信互动", "线下活动", "见任何人"],
@@ -186,6 +195,69 @@ class LifeEngine(Star):
 
     def _today_record(self):
         return self._life()["days"].get(_today())
+
+    # ---------------- 作品库（长期去重） ----------------
+
+    def _library(self) -> dict:
+        data = _load_json(LIBRARY_PATH, {})
+        if not isinstance(data, dict) or not isinstance(data.get("works"), dict):
+            return {"works": {}}
+        return data
+
+    def _save_library(self, data: dict) -> None:
+        _write_json(LIBRARY_PATH, data)
+
+    def _note_works(self, works, day: str = "") -> None:
+        """把作品记进长期库：玩过/看过的，以后不再当新坑。"""
+        lib = self._library()
+        items = lib["works"]
+        changed = False
+        for raw in works or []:
+            if isinstance(raw, dict):
+                name = _clean(str(raw.get("name") or ""))[:30]
+                wtype = str(raw.get("type") or "").strip().lower()
+            else:
+                name = _clean(str(raw))[:30]
+                wtype = ""
+            if not name:
+                continue
+            stamp = day or _today()
+            record = items.get(name)
+            if isinstance(record, dict):
+                record["last"] = stamp
+                try:
+                    record["count"] = int(record.get("count") or 0) + 1
+                except Exception:
+                    record["count"] = 1
+                if wtype and not record.get("type"):
+                    record["type"] = wtype
+            else:
+                items[name] = {
+                    "type": wtype or "?",
+                    "first": stamp,
+                    "last": stamp,
+                    "count": 1,
+                }
+            changed = True
+        if changed:
+            lib["works"] = items
+            self._save_library(lib)
+
+    def _library_block(self, cooldown_days: int = 60) -> str:
+        """告诉模型：这些已经玩过/看过了，最近别再当新发现。"""
+        items = self._library().get("works") or {}
+        if not items:
+            return ""
+        cutoff = (date.today() - timedelta(days=max(1, cooldown_days))).isoformat()
+        fresh = [
+            name
+            for name, record in items.items()
+            if isinstance(record, dict) and str(record.get("last") or "") >= cutoff
+        ]
+        bits = [f"你已经看过或玩过 {len(items)} 部作品，不要当成今天新发现的"]
+        if fresh:
+            bits.append("最近还碰过的：" + "、".join(fresh[:12]))
+        return "；".join(bits) + "。\n"
 
     # ---------------- 抓冲浪素材 ----------------
 
@@ -366,7 +438,7 @@ class LifeEngine(Star):
                 "https://api.anysearch.com/v1/search",
                 json={"query": query, "max_results": limit},
                 headers=headers,
-                timeout=httpx.Timeout(8.0, connect=4.0),
+                timeout=httpx.Timeout(12.0, connect=5.0),
             )
             if resp.status_code != 200:
                 logger.info(f"[life_engine] 搜索兜底跳过（HTTP {resp.status_code}）")
@@ -407,6 +479,36 @@ class LifeEngine(Star):
             client, f"{names[0]} 更新到第几集 最新进度", limit=3, api_key=api_key
         )
 
+    async def _search_discover(self, client, profile, cfg, api_key: str = ""):
+        """按口味去搜“最近有什么能开的新坑”，结果作为候选素材。
+
+        查询词是门学问：带一堆顿号分隔的口味词会让搜索结果跑偏，
+        实测「2026年10月新番 一览」这种“找清单页”的问法才拿得到作品名。
+        """
+        prefs = profile.get("preferences") or {}
+        if not isinstance(prefs, dict):
+            return []
+        anime = [str(x).strip() for x in (prefs.get("anime") or []) if str(x).strip()]
+        games = [str(x).strip() for x in (prefs.get("games") or []) if str(x).strip()]
+        today = date.today()
+        year = today.year
+        queries = []
+        if anime:
+            queries.append(f"{year}年{today.month}月新番 一览 {anime[0]} 推荐")
+        if games:
+            queries.append(f"Steam {games[0]} 游戏 推荐 {year}")
+        try:
+            limit = max(1, min(int(cfg.get("discover_per_day", 2)), 3))
+        except (TypeError, ValueError):
+            limit = 2
+        out = []
+        for query in queries[:limit]:
+            for item in await self._anysearch(client, query, limit=4, api_key=api_key):
+                item["kind"] = "发现"
+                item["desc"] = (item.get("desc") or "")[:200]
+                out.append(item)
+        return out
+
     async def _collect(self, cfg=None):
         cfg = cfg or {}
         timeout = httpx.Timeout(12.0, connect=8.0)
@@ -425,15 +527,19 @@ class LifeEngine(Star):
                 if isinstance(res, Exception) or not res:
                     continue
                 material.extend(res)
+            api_key = str(cfg.get("search_api_key") or "")
             if cfg.get("search_enrich", True):
                 try:
-                    material.extend(
-                        await self._search_enrich(
-                            client, material, str(cfg.get("search_api_key") or "")
-                        )
-                    )
+                    material.extend(await self._search_enrich(client, material, api_key))
                 except Exception:
                     logger.exception("[life_engine] 搜索补充失败，跳过")
+            if cfg.get("discover_enabled", True):
+                try:
+                    material.extend(
+                        await self._search_discover(client, self._profile(), cfg, api_key)
+                    )
+                except Exception:
+                    logger.exception("[life_engine] 发现候选失败，跳过")
         return material
 
     # ---------------- 人设 ----------------
@@ -473,6 +579,18 @@ class LifeEngine(Star):
         )
 
     # ---------------- 生成 ----------------
+
+    @staticmethod
+    def _guess_type(name: str, material) -> str:
+        """看这个名字出自哪一路素材，判断是番还是游戏。"""
+        for item in material:
+            if name and name in str(item.get("title") or ""):
+                kind = item.get("kind")
+                if kind == "番剧榜":
+                    return "anime"
+                if kind == "游戏榜":
+                    return "game"
+        return ""
 
     def _recent_block(self, days: int = 3) -> str:
         """最近几天自己看过、玩过什么——用来防止天天重复同一件事。"""
@@ -528,6 +646,7 @@ class LifeEngine(Star):
                     _short(e.get("text", ""), 20) for e in events[-3:]
                 ) + "\n"
         recent_block = self._recent_block(int(cfg.get("recent_days", 3)))
+        lib_block = self._library_block(int(cfg.get("cooldown_days", 60)))
 
         return (
             "你在给自己安排今天。\n"
@@ -535,13 +654,15 @@ class LifeEngine(Star):
             f"你的作息：{wake} 起床（爱赖床），{sleep} 睡觉。\n"
             f"{y_block}"
             f"{recent_block}"
+            f"{lib_block}"
             "今天网上在聊这些（只能按编号引用，不要编造）：\n"
             + "\n".join(lines)
             + "\n\n"
             "请输出 JSON（不要代码块、不要多余文字）：\n"
             '{"plan": ["今天想做的三件事"], "mood": "一句心情", '
             '"timeline": [{"t": "09:10", "text": "一句你正在做的事"}], '
-            '"seen": [{"i": 1, "take": "你看到它的反应"}]}\n'
+            '"seen": [{"i": 1, "take": "你看到它的反应"}], '
+            '"started": [{"name": "今天开的新坑", "type": "anime"}]}\n'
             "要求：\n"
             f"- plan 三件，都是一个人能做的，别写社交、别写出门见人。\n"
             f"- timeline {cfg.get('events_min', 4)}~{cfg.get('events_max', 6)} 条，"
@@ -550,6 +671,8 @@ class LifeEngine(Star):
             "- 素材里出现具体作品名（游戏、番剧）时，plan 和时间线要直接写这个名字，"
             "不要用「那个番」「某个游戏」这种泛指。\n"
             "- 只能用素材里出现过的作品名，不要编造没出现过的游戏或番剧。\n"
+            "- 标着「发现」的条目是可以开的新坑候选：真想开就从中挑，"
+            "并把名字和类型写进 started（type 只能是 anime 或 game，最多 1 个）。\n"
             "- 最近几天已经写过的事不要原样再写一遍：同一部番/同一个游戏可以继续，"
             "但今天要有推进（集数或进度往前走），不能重复同一段情节。\n"
             "- 只写你自己在做什么，不要写你和用户聊天、发消息。\n"
@@ -618,7 +741,21 @@ class LifeEngine(Star):
                         "take": _clean(str(entry.get("take") or ""))[:60],
                     }
                 )
-        return {"plan": plan, "mood": mood, "timeline": timeline, "seen": seen[:2]}
+        started = []
+        for entry in data.get("started") or []:
+            if not isinstance(entry, dict):
+                continue
+            name = _clean(str(entry.get("name") or ""))[:30]
+            kind = str(entry.get("type") or "").strip().lower()
+            if name and kind in ("anime", "game") and name not in [s["name"] for s in started]:
+                started.append({"name": name, "type": kind})
+        return {
+            "plan": plan,
+            "mood": mood,
+            "timeline": timeline,
+            "seen": seen[:2],
+            "started": started[:1],
+        }
 
     def _fallback_day(self, cfg) -> dict:
         """调用失败时的兜底，别让她那天没有生活。"""
@@ -685,6 +822,19 @@ class LifeEngine(Star):
         day["diary_written"] = False
         day["source_count"] = len(material)
         day["works"] = self._extract_works(day, material)
+        try:
+            started = day.get("started") or []
+            if started:
+                self._note_works(started)
+            if day["works"]:
+                self._note_works(
+                    [
+                        {"name": name, "type": self._guess_type(name, material)}
+                        for name in day["works"]
+                    ]
+                )
+        except Exception:
+            logger.exception("[life_engine] 更新作品库失败")
 
         life["days"][today] = day
         self._save_life(life, max(3, min(int(cfg.get("keep_days", 7)), 30)))

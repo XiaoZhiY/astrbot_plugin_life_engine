@@ -23,6 +23,34 @@
     "default": "",
     "hint": "留空走匿名额度（每天 1000 次，按 IP 限流）。注册后填 key 则额度绑到账号上，不跟 IP 走。"
   },
+  "discover_enabled": {
+    "description": "按口味搜新坑",
+    "type": "bool",
+    "default": true,
+    "hint": "用 profile.json 里的 preferences 去搜“最近有什么符合口味的新番/新游戏”，作为候选素材。搜不到就跳过。"
+  },
+  "discover_per_day": {
+    "description": "每天搜几类新坑",
+    "type": "int",
+    "default": 2,
+    "slider": {
+      "min": 1,
+      "max": 3,
+      "step": 1
+    },
+    "hint": "番剧、游戏各算一类；每次搜索约 3~8 秒。"
+  },
+  "cooldown_days": {
+    "description": "作品冷却天数",
+    "type": "int",
+    "default": 60,
+    "slider": {
+      "min": 7,
+      "max": 365,
+      "step": 1
+    },
+    "hint": "library.json 里记过的作品，这么多天内不会再被当成“新发现”。"
+  },
   "recent_days": {
     "description": "防重复：看最近几天",
     "type": "int",
