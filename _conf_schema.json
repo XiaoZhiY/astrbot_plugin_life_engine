@@ -1,0 +1,138 @@
+{
+  "enabled": {
+    "description": "启用生活系统",
+    "type": "bool",
+    "default": true,
+    "hint": "关闭后不生成、不注入；已有的 life.json 仍然保留。"
+  },
+  "persona": {
+    "description": "备用口吻",
+    "type": "string",
+    "default": "",
+    "hint": "留空会自动读取该会话当前人设；读不到人设时才用这一句，一两句话即可。"
+  },
+  "generate_hour": {
+    "description": "每天几点安排今天（时）",
+    "type": "int",
+    "default": 8,
+    "slider": {
+      "min": 0,
+      "max": 23,
+      "step": 1
+    },
+    "hint": "每天 1 次模型调用，产出计划 + 时间线 + 刷到的东西。"
+  },
+  "generate_minute": {
+    "description": "每天几点安排今天（分）",
+    "type": "int",
+    "default": 30,
+    "slider": {
+      "min": 0,
+      "max": 59,
+      "step": 1
+    },
+    "hint": "默认 08:30；建议晚于起床时间。"
+  },
+  "wake_time": {
+    "description": "几点起床",
+    "type": "string",
+    "default": "08:30",
+    "hint": "HH:MM。早于这个时间不会安排任何事件（还在睡）。"
+  },
+  "sleep_time": {
+    "description": "几点睡觉",
+    "type": "string",
+    "default": "00:30",
+    "hint": "HH:MM。晚于这个时间不会安排事件；可以跨过午夜。"
+  },
+  "events_min": {
+    "description": "时间线最少几条",
+    "type": "int",
+    "default": 4,
+    "slider": {
+      "min": 2,
+      "max": 8,
+      "step": 1
+    },
+    "hint": "太少显得空，太多像流水账。"
+  },
+  "events_max": {
+    "description": "时间线最多几条",
+    "type": "int",
+    "default": 6,
+    "slider": {
+      "min": 2,
+      "max": 8,
+      "step": 1
+    },
+    "hint": "超出部分会被截掉。"
+  },
+  "keep_days": {
+    "description": "生活记录保留几天",
+    "type": "int",
+    "default": 7,
+    "slider": {
+      "min": 2,
+      "max": 30,
+      "step": 1
+    },
+    "hint": "超过这个天数的记录会自动清掉，防止 life.json 越堆越大。"
+  },
+  "retry_times": {
+    "description": "生成失败重试次数",
+    "type": "int",
+    "default": 3,
+    "slider": {
+      "min": 1,
+      "max": 5,
+      "step": 1
+    },
+    "hint": "失败按 2 / 5 / 15 分钟退避；同一天成功过就不会重复生成。"
+  },
+  "umo": {
+    "description": "哪个会话",
+    "type": "string",
+    "default": "",
+    "hint": "填会话的 unified_msg_origin，格式是 平台:消息类型:会话ID，例如 qq_official:FriendMessage:DEADBEEF。注入和写日记都按这个会话。"
+  },
+  "inject_mode": {
+    "description": "生活注入方式",
+    "type": "string",
+    "default": "low",
+    "options": [
+      "off",
+      "low",
+      "always"
+    ],
+    "hint": "off=不注入；low=距上次注入超过间隔后的第一轮才注入（推荐）；always=每轮都注入（更费 token）。"
+  },
+  "inject_gap_minutes": {
+    "description": "低频注入的间隔（分钟）",
+    "type": "int",
+    "default": 30,
+    "slider": {
+      "min": 5,
+      "max": 240,
+      "step": 5
+    },
+    "hint": "只有 inject_mode=low 时生效：距上次注入超过这么久，下一轮才注入。"
+  },
+  "write_to_diary": {
+    "description": "把当天生活写进日记",
+    "type": "bool",
+    "default": true,
+    "hint": "需要同时装一个提供 memory_diary 数据库的日记插件，并给该会话开启日记；没有就自动跳过。"
+  },
+  "diary_at": {
+    "description": "几点把当天生活写进日记",
+    "type": "string",
+    "default": "01:30",
+    "hint": "HH:MM，必须早于日记插件的整理时间（常见是凌晨 04:00）。"
+  },
+  "diary_sender": {
+    "description": "日记里显示的发信人",
+    "type": "string",
+    "default": "助手",
+    "hint": "写进日记素材时用的显示名，通常填 Bot 的名字。"
+  }
+}

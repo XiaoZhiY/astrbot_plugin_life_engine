@@ -1,0 +1,16 @@
+name: astrbot_plugin_life_engine
+display_name: 生活引擎
+short_desc: 每天给 Bot 安排它自己的日子，并把这段生活低频注入对话。
+desc: >-
+  每天一次调用，结合人设与兴趣，从抖音热榜、B站、网易云等真实素材里生成今天的
+  计划、时间线和刷到的东西，全天不再调用模型；素材只能按编号引用，模型编不出
+  不存在的内容。支持把这段生活低频注入对话的 system prompt、按时区写进日记、
+  失败重试与同一天幂等。
+version: 1.0.0
+author: XiaoZhiY
+repo: https://github.com/XiaoZhiY/astrbot_plugin_life_engine
+astrbot_version: ">=4.14.0"
+tags:
+  - 人设
+  - 生活
+  - 定时
